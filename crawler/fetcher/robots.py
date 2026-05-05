@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
 import aiohttp
@@ -25,7 +25,7 @@ class RobotsCache:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._cache: dict[str, tuple[RobotFileParser, float]] = {}
-        self._lock = asyncio.Lock()
+        self._locks: dict[str, asyncio.Lock] = {}
         self._session: Optional[aiohttp.ClientSession] = None
 
     def set_session(self, session: aiohttp.ClientSession) -> None:
@@ -54,7 +54,10 @@ class RobotsCache:
         domain = f"{parsed.scheme}://{parsed.netloc}"
         robots_url = self._robots_url(url)
 
-        async with self._lock:
+        if domain not in self._locks:
+            self._locks[domain] = asyncio.Lock()
+
+        async with self._locks[domain]:
             cached = self._cache.get(domain)
             if cached is None or (time.monotonic() - cached[1]) > _CACHE_TTL:
                 parser = await self._fetch_robots(robots_url)

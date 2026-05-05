@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PageCategory(str, Enum):
@@ -27,7 +27,7 @@ class PageClassification(BaseModel):
 class ExtractedData(BaseModel):
     task_id: str
     url: str
-    crawled_at: datetime = None  # type: ignore[assignment]
+    crawled_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     classification: PageClassification = PageClassification()
     title: str = ""
     summary: str = ""
@@ -36,6 +36,3 @@ class ExtractedData(BaseModel):
     outbound_links: list[str] = []
     raw_text_hash: str = ""
 
-    def model_post_init(self, __context: Any) -> None:
-        if self.crawled_at is None:
-            self.crawled_at = datetime.now(timezone.utc)

@@ -86,9 +86,16 @@ class CrawlEngine:
             self._stats.pages_failed = cp["pages_failed"]
             seed_urls = cp["seed_urls"]
         else:
-            if not resume:
-                await dedup.reset()
-                await checkpoint.clear()
+            if resume:
+                logger.warning(
+                    "--resume requested but no checkpoint found; starting fresh crawl"
+                )
+            await dedup.reset()
+            await checkpoint.clear()
+            logger.warning(
+                "Starting fresh crawl. If a previous run was interrupted, "
+                "run 'python main.py reset' first to clear stale Redis state."
+            )
             await scheduler.enqueue_seeds(seed_urls)
 
         rate_limiter = AdaptiveRateLimiter(self._settings)
@@ -219,7 +226,7 @@ class CrawlEngine:
                 if reclaimed:
                     logger.info("Reclaimed %d stale tasks from crashed workers", len(reclaimed))
                     for task in reclaimed:
-                        await scheduler.enqueue(task)
+                        await queue.enqueue(task)
                 last_stale_reclaim = time.monotonic()
 
             # Stop if page limit reached

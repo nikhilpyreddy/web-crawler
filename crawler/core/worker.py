@@ -107,15 +107,12 @@ class CrawlWorker:
         await self._pages_crawled.put(1)
 
     async def _write_result(self, data: ExtractedData) -> None:
+        import aiofiles
         from urllib.parse import urlparse
         domain = urlparse(data.url).netloc
         date_str = data.crawled_at.strftime("%Y-%m-%d")
         out_path = self._output_dir / domain / f"{date_str}.jsonl"
         out_path.parent.mkdir(parents=True, exist_ok=True)
-
         line = data.model_dump_json() + "\n"
-        # Append atomically within the worker — cross-worker safety relies on
-        # each worker writing to its own date shard. For multi-process deployments
-        # use aiofiles or a dedicated writer coroutine.
-        with open(out_path, "a", encoding="utf-8") as f:
-            f.write(line)
+        async with aiofiles.open(out_path, "a", encoding="utf-8") as f:
+            await f.write(line)

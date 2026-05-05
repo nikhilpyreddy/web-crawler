@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 
 class TaskStatus(str, Enum):
@@ -25,7 +26,7 @@ class CrawlTask(BaseModel):
     priority: float = 0.0
     status: TaskStatus = TaskStatus.PENDING
     retry_count: int = 0
-    created_at: datetime = None  # type: ignore[assignment]
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     enqueued_at: Optional[datetime] = None
     domain: str = ""
     metadata: dict[str, Any] = {}
@@ -33,8 +34,6 @@ class CrawlTask(BaseModel):
     def model_post_init(self, __context: Any) -> None:
         if not self.task_id:
             self.task_id = str(uuid.uuid4())
-        if self.created_at is None:
-            self.created_at = datetime.now(timezone.utc)
         if not self.domain:
             parsed = urlparse(self.url)
             self.domain = parsed.netloc
@@ -52,6 +51,7 @@ class CrawlTask(BaseModel):
             "created_at": self.created_at.isoformat(),
             "enqueued_at": self.enqueued_at.isoformat() if self.enqueued_at else "",
             "domain": self.domain,
+            "metadata": json.dumps(self.metadata),
         }
 
     @classmethod
@@ -67,4 +67,5 @@ class CrawlTask(BaseModel):
             created_at=datetime.fromisoformat(data["created_at"]),
             enqueued_at=datetime.fromisoformat(data["enqueued_at"]) if data.get("enqueued_at") else None,
             domain=data["domain"],
+            metadata=json.loads(data.get("metadata", "{}")),
         )

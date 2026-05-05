@@ -85,7 +85,11 @@ class TaskQueue:
 
     async def depth(self) -> int:
         """Return approximate number of pending messages in the stream."""
-        info = await self._r.xinfo_stream(self._stream)
-        if isinstance(info, dict):
-            return info.get("length", 0)
+        try:
+            groups = await self._r.xinfo_groups(self._stream)
+            for group in groups:
+                if group.get("name") == self._group:
+                    return int(group.get("lag") or group.get("pending") or 0)
+        except Exception:
+            pass
         return 0

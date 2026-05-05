@@ -53,7 +53,7 @@ class RetryPolicy:
                 delay = self._delay(attempt, retry_after)
                 logger.warning(
                     "Retryable HTTP %d for %s (attempt %d/%d), sleeping %.1fs",
-                    e.status, label, attempt + 1, self._max_retries, delay,
+                    e.status, label, attempt + 1, self._max_retries + 1, delay,
                 )
                 await asyncio.sleep(delay)
                 last_exc = e
@@ -63,9 +63,7 @@ class RetryPolicy:
                 delay = self._delay(attempt)
                 logger.warning(
                     "Network error for %s (attempt %d/%d): %s, sleeping %.1fs",
-                    label, attempt + 1, self._max_retries, e, delay,
+                    label, attempt + 1, self._max_retries + 1, e, delay,
                 )
                 await asyncio.sleep(delay)
                 last_exc = e
-
-        raise RuntimeError(f"Exhausted retries for {label}") from last_exc
