@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import platform
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -23,7 +24,9 @@ from crawler.redis_backend.task_queue import TaskQueue
 
 logger = logging.getLogger(__name__)
 
-_CHECKPOINT_INTERVAL = 30  # seconds
+_CHECKPOINT_INTERVAL = 30   # seconds
+_IDLE_STOP_THRESHOLD = 10   # consecutive empty-queue ticks before auto-stop
+_STALE_RECLAIM_INTERVAL = 60  # seconds between stale-PEL reclamation sweeps
 
 
 @dataclass
@@ -81,7 +84,6 @@ class CrawlEngine:
             )
             self._stats.pages_crawled = cp["pages_crawled"]
             self._stats.pages_failed = cp["pages_failed"]
-            # Seed URLs from the checkpoint so the queue can replay stale PEL entries
             seed_urls = cp["seed_urls"]
         else:
             if not resume:
@@ -99,7 +101,7 @@ class CrawlEngine:
 
         async with AsyncHTTPClient(self._settings) as http_client:
             robots = RobotsCache(self._settings)
-            robots.set_session(http_client._session)  # share session
+            robots.set_session(http_client.session)
 
             workers = [
                 CrawlWorker(
@@ -120,12 +122,12 @@ class CrawlEngine:
 
             self._install_signal_handlers()
 
-            tasks = [asyncio.create_task(w.run()) for w in workers]
+            worker_tasks = [asyncio.create_task(w.run()) for w in workers]
             monitor = asyncio.create_task(
-                self._monitor_loop(pages_crawled_q, pages_failed_q, checkpoint, seed_urls)
+                self._monitor_loop(pages_crawled_q, pages_failed_q, checkpoint, queue, scheduler, seed_urls)
             )
 
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*worker_tasks)
             monitor.cancel()
             try:
                 await monitor
@@ -135,7 +137,6 @@ class CrawlEngine:
         executor.shutdown(wait=False)
         await redis_client.aclose()
 
-        # Final checkpoint
         await self._save_checkpoint(checkpoint, seed_urls)
         logger.info(
             "Crawl complete: %d pages in %.1fs (%.1f p/s)",
@@ -149,38 +150,77 @@ class CrawlEngine:
         self._stop_event.set()
 
     def _install_signal_handlers(self) -> None:
+        """
+        Register SIGINT/SIGTERM handlers for graceful shutdown.
+        loop.add_signal_handler() is Unix-only; on Windows we fall back to
+        a simple signal.signal() call (best-effort, not async-safe).
+        """
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
+        if platform.system() != "Windows":
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
+        else:
+            # Windows: asyncio signal handlers are not supported for SIGTERM.
+            # SIGINT (Ctrl-C) is handled by KeyboardInterrupt in main.py.
+            try:
+                signal.signal(signal.SIGINT, lambda *_: asyncio.create_task(self.stop()))
+            except (OSError, ValueError):
+                pass  # non-main thread — caller handles it
 
     async def _monitor_loop(
         self,
         crawled_q: asyncio.Queue[int],
         failed_q: asyncio.Queue[int],
         checkpoint: CheckpointManager,
+        queue: TaskQueue,
+        scheduler: Scheduler,
         seed_urls: list[str],
     ) -> None:
         last_checkpoint = time.monotonic()
+        last_stale_reclaim = time.monotonic()
+        idle_ticks = 0
+
         while not self._stop_event.is_set():
             await asyncio.sleep(5)
+
             # Drain stat queues
             while not crawled_q.empty():
                 self._stats.pages_crawled += crawled_q.get_nowait()
             while not failed_q.empty():
                 self._stats.pages_failed += failed_q.get_nowait()
 
+            depth = await queue.depth()
             logger.info(
-                "Stats: crawled=%d failed=%d rate=%.1f p/s elapsed=%.0fs",
+                "Stats: crawled=%d failed=%d queue=%d rate=%.1f p/s elapsed=%.0fs",
                 self._stats.pages_crawled,
                 self._stats.pages_failed,
+                depth,
                 self._stats.pages_per_second,
                 self._stats.elapsed_seconds,
             )
+
+            # Idle detection — stop when queue stays empty for N ticks
+            if depth == 0:
+                idle_ticks += 1
+                if idle_ticks >= _IDLE_STOP_THRESHOLD:
+                    logger.info("Queue has been empty for %d ticks — crawl complete", idle_ticks)
+                    await self.stop()
+            else:
+                idle_ticks = 0
 
             # Periodic checkpoint
             if time.monotonic() - last_checkpoint >= _CHECKPOINT_INTERVAL:
                 await self._save_checkpoint(checkpoint, seed_urls)
                 last_checkpoint = time.monotonic()
+
+            # Reclaim stale PEL entries from crashed workers
+            if time.monotonic() - last_stale_reclaim >= _STALE_RECLAIM_INTERVAL:
+                reclaimed = await queue.reclaim_stale(min_idle_ms=int(_STALE_RECLAIM_INTERVAL * 1000))
+                if reclaimed:
+                    logger.info("Reclaimed %d stale tasks from crashed workers", len(reclaimed))
+                    for task in reclaimed:
+                        await scheduler.enqueue(task)
+                last_stale_reclaim = time.monotonic()
 
             # Stop if page limit reached
             if self._stats.pages_crawled >= self._settings.max_pages:

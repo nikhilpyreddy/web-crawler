@@ -45,6 +45,11 @@ class AsyncHTTPClient:
         if self._session:
             await self._session.close()
 
+    @property
+    def session(self) -> aiohttp.ClientSession:
+        assert self._session is not None, "AsyncHTTPClient must be used as a context manager"
+        return self._session
+
     async def get(self, task: CrawlTask, extra_headers: Optional[dict[str, str]] = None) -> FetchResult:
         assert self._session is not None, "AsyncHTTPClient must be used as a context manager"
 
